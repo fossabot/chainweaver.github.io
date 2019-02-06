@@ -1,0 +1,150 @@
+version: 2
+jobs:
+  deploy-heroku:
+    machine:
+      image: circleci/classic:edge
+      docker_layer_caching: true # Paid users only
+    steps:
+      - checkout
+      - run:
+          name: Setting heroku
+          command: |
+            .circleci/setup-heroku-auth.sh
+      - add_ssh_keys:
+          fingerprints:
+          - "b2:f3:eb:9c:59:b6:91:49:65:19:98:82:4e:42:e7:33"
+      - run:
+          name: Deploying to heroku and saving heroku docker image layers
+          working_directory: docusaurus
+          command: |
+            export HEROKU_APP_ID=$(~/project/.circleci/setHerokuAppId.sh chainweaver-io)
+
+            heroku container:login
+            if [ `heroku apps | grep $HEROKU_APP_ID | wc -l` == 0 ]; then
+              heroku apps:create $HEROKU_APP_ID
+            fi
+
+            heroku container:push web --app $HEROKU_APP_ID
+            heroku container:release web --app $HEROKU_APP_ID
+
+  notify-slack:
+    docker:
+      - image: circleci/node:8.15
+    steps:
+      - checkout
+      - run:
+          name: Setting heroku
+          command: |
+            export HEROKU_APP_ID=$(.circleci/setHerokuAppId.sh chainweaver-io)
+
+            curl -X POST --data-urlencode \
+              "payload={\
+                \"channel\": \"#$NOTIFICATION_SLACK_CHANNEL\",\
+                \"username\": \"$NOTIFICATION_SLACK_USERNAME\",\
+                \"text\": \"Please check the test site!\nhttps://$HEROKU_APP_ID.herokuapp.com\n\nPlease approve it, if there is no problem\nhttps://circleci.com/workflow-run/$CIRCLE_WORKFLOW_ID\",\
+                \"icon_emoji\": \":$NOTIFICATION_SLACK_ICON_EMOJI:\"\
+              }" \
+              $NOTIFICATION_SLACK_WEBHOOK_URL
+
+  deploy-website:
+    docker:
+      - image: circleci/node:8.15
+    steps:
+      - add_ssh_keys:
+          fingerprints:
+          - "44:71:99:62:3b:7e:4a:d7:cf:d5:f0:b2:ad:d6:17:46"
+      - checkout
+      - restore_cache:
+          key: v1-module-cache-{{ .Branch }}-{{ checksum "docusaurus/website/yarn.lock" }}
+      - run:
+          name: Building
+          working_directory: docusaurus/website
+          command: |
+            if [ ! -d node_modules ]; then
+              yarn install
+            fi
+            yarn run build
+      - save_cache:
+          key: v1-module-cache-{{ .Branch }}-{{ checksum "docusaurus/website/yarn.lock" }}
+          paths:
+            - docusaurus/website/node_modules
+            - docusaurus/website/.cache/yarn/
+      - run:
+          name: Build docusaurus
+          working_directory: docusaurus/website
+          command: |
+            git config --global user.email "$GIT_USER_EMAIL"
+            git config --global user.name "$GIT_USER"
+
+            yarn run build
+
+            # Resources to be overwritten
+            cp static/index.html build/chainweaver.github.io/
+            git add build
+            git commit -m "[ci skip] Update build directory"
+            git push
+      - run:
+          name: Deploying to GitHub Pages
+          command: |
+            git config --global user.email "$GIT_USER_EMAIL"
+            git config --global user.name "$GIT_USER"
+
+            # `publish-gh-pages` command is not used because static resources are not overwritten
+            git push origin `git subtree split --prefix docusaurus/website/build/chainweaver.github.io source`:master --force
+          when: always
+
+  undeploy-heroku:
+    machine:
+      image: circleci/classic:edge
+    steps:
+      - checkout
+      - run:
+          name: Setting heroku
+          command: |
+            .circleci/setup-heroku-auth.sh
+      - add_ssh_keys:
+          fingerprints:
+          - "b2:f3:eb:9c:59:b6:91:49:65:19:98:82:4e:42:e7:33"
+      - run:
+          name: Un Deploying a heroku app
+          command: |
+            export HEROKU_APP_ID=$(.circleci/setHerokuAppId.sh chainweaver-io)
+
+            heroku container:login
+            if [ `heroku apps | grep $HEROKU_APP_ID | wc -l` != 0 ]; then
+              heroku apps:destroy $HEROKU_APP_ID --confirm $HEROKU_APP_ID
+            fi
+
+workflows:
+  version: 2
+  chainweaver-website:
+    jobs:
+      - deploy-heroku:
+          filters:
+            tags:
+              only: /.*/
+      - notify-slack:
+          requires:
+           - deploy-heroku
+          filters:
+            tags:
+              only: /.*/
+      - approval-deploy-website:
+          type: approval
+          requires:
+           - notify-slack
+          filters:
+            tags:
+              only: /.*/
+      - deploy-website:
+          requires:
+           - approval-deploy-website
+          filters:
+            tags:
+              only: /.*/
+      - undeploy-heroku:
+          requires:
+            - deploy-website
+          filters:
+            tags:
+              only: /.*/
