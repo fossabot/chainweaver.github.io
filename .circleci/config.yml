@@ -50,9 +50,6 @@ jobs:
     docker:
       - image: circleci/node:8.15
     steps:
-      - add_ssh_keys:
-          fingerprints:
-          - "44:71:99:62:3b:7e:4a:d7:cf:d5:f0:b2:ad:d6:17:46"
       - checkout
       - restore_cache:
           key: v1-module-cache-{{ .Branch }}-{{ checksum "docusaurus/website/yarn.lock" }}
@@ -82,7 +79,9 @@ jobs:
             cp static/index.html build/chainweaver.github.io/
             git add build
             git commit -m "[ci skip] Update build directory"
-            git push
+
+            git remote add upstream https://$GITHUB_ACCESS_TOKEN@github.com/chainweaver/chainweaver.github.io
+            git push upstream $CIRCLE_BRANCH
       - run:
           name: Deploying to GitHub Pages
           command: |
@@ -90,7 +89,7 @@ jobs:
             git config --global user.name "$GIT_USER"
 
             # `publish-gh-pages` command is not used because static resources are not overwritten
-            git push origin `git subtree split --prefix docusaurus/website/build/chainweaver.github.io source`:master --force
+            git push upstream `git subtree split --prefix docusaurus/website/build/chainweaver.github.io source`:master --force
           when: always
 
   undeploy-heroku:
